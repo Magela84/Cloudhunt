@@ -1,0 +1,14 @@
+{
+  "_comment": "Public ATS board identifiers for direct-employer postings. Edit these to target the companies you care about. Greenhouse/Lever use the board token in the company's careers URL (e.g. boards.greenhouse.io/<token>); Ashby uses the job-board name (jobs.ashbyhq.com/<name>). Unknown/invalid tokens are skipped gracefully.",
+  "greenhouse": [
+    "stripe",
+    "databricks",
+    "coinbase",
+    "dropbox",
+    "robinhood",
+    "doordash",
+    "instacart"
+  ],
+  "lever": ["plaid", "ramp", "brex"],
+  "ashby": ["linear", "vanta", "runway"]
+}

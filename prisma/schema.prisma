@@ -1,0 +1,259 @@
+// CloudHunt data model.
+// Auth identities live in Supabase (auth.users). Our `User` row is keyed by the
+// Supabase auth uid so app data joins cleanly to the authenticated session.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ---------------------------------------------------------------------------
+// User & profile
+// ---------------------------------------------------------------------------
+
+enum RemotePreference {
+  REMOTE
+  HYBRID
+  ONSITE
+  ANY
+}
+
+model User {
+  id        String   @id // Supabase auth user uid
+  email     String   @unique
+  fullName  String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Profile / onboarding
+  onboardedAt       DateTime?
+  targetTitles      String[] // e.g. ["Cloud Engineer", "DevOps Engineer"]
+  yearsExperience   Int?
+  certifications    String[] // e.g. ["AWS SAA", "Terraform Associate"]
+  locationCity      String?
+  locationCountry   String?
+  remotePreference  RemotePreference @default(ANY)
+  workAuthorization String? // e.g. "US Citizen", "Requires sponsorship"
+  targetSalaryMin   Int?
+  targetSalaryMax   Int?
+  cloudSkills       String[] // free-form + taxonomy-normalized cloud skills
+
+  // Settings
+  fitThreshold Int @default(85) // Phase 3 default feed threshold (adjustable)
+
+  resumes    Resume[]
+  jobScores  JobScore[]
+  reviewItems ReviewItem[]
+  contacts   Contact[]
+  outreach   Outreach[]
+}
+
+// ---------------------------------------------------------------------------
+// Resume (multiple versions per user)
+// ---------------------------------------------------------------------------
+
+model Resume {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  label     String   @default("Base resume")
+  isBase    Boolean  @default(false) // the canonical source-of-truth resume
+  rawText   String   @db.Text
+
+  // Structured sections extracted by the LLM (editable by the user).
+  // Stored as JSON so the shape can evolve without migrations.
+  // { summary, experience: [...], skills: [...], education: [...], certifications: [...] }
+  sections  Json?
+
+  // If this resume was tailored to a specific job (Phase 4)
+  tailoredForJobId String?
+  tailoredForJob   Job?    @relation("ResumeTailoredForJob", fields: [tailoredForJobId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  reviewItems ReviewItem[]
+
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Job (shared across users; scores are per-user)
+// ---------------------------------------------------------------------------
+
+model Job {
+  id          String   @id @default(cuid())
+  source      String // "adzuna" | "arbeitnow" | "remoteok" | "greenhouse" | "lever" | "ashby"
+  sourceId    String // id within the source
+  title       String
+  company     String
+  description String   @db.Text
+  location    String?
+  remote      Boolean  @default(false)
+  salaryMin   Int?
+  salaryMax   Int?
+  salaryCurrency String?
+  sourceUrl   String // canonical posting url
+  applyUrl    String? // real application url for the user to submit manually
+
+  postedAt    DateTime?
+  firstSeenAt DateTime @default(now())
+  lastSeenAt  DateTime @default(now())
+  seenCount   Int      @default(1)
+
+  // Hash of normalized title+company+description for dedupe / repost detection.
+  rawHash     String
+
+  // Contact info present in the source posting only (Phase 6 guardrail).
+  contacts    Contact[]
+  scores      JobScore[]
+  reviewItems ReviewItem[]
+  tailoredResumes Resume[] @relation("ResumeTailoredForJob")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([source, sourceId])
+  @@index([rawHash])
+  @@index([company])
+}
+
+// ---------------------------------------------------------------------------
+// JobScore (one per user+job)
+// ---------------------------------------------------------------------------
+
+enum FitBucket {
+  MATCH
+  STRETCH
+  REACH
+  SKIP
+}
+
+model JobScore {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  jobId  String
+  job    Job    @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  // Phase 2 — Legit Score (estimate)
+  legitScore      Int?
+  legitSignals    Json? // structured breakdown for the "why"
+
+  // Phase 3 — Fit Score
+  fitScore        Int?
+  fitBucket       FitBucket?
+  fitReasoning    Json?
+
+  // Phase 4 — ATS / keyword match
+  atsScore        Int?
+  matchedKeywords String[]
+  missingKeywords String[]
+  reasoning       String?  @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, jobId])
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// ReviewItem (Phase 5 — review & submit queue)
+// ---------------------------------------------------------------------------
+
+enum ReviewStatus {
+  QUEUED
+  REVIEWED
+  SUBMITTED
+  SKIPPED
+}
+
+enum Outcome {
+  NONE
+  CALLBACK
+  INTERVIEW
+  OFFER
+  REJECTED
+}
+
+model ReviewItem {
+  id               String       @id @default(cuid())
+  userId           String
+  user             User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  jobId            String
+  job              Job          @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  tailoredResumeId String?
+  tailoredResume   Resume?      @relation(fields: [tailoredResumeId], references: [id], onDelete: SetNull)
+
+  status      ReviewStatus @default(QUEUED)
+  submittedAt DateTime?
+  outcome     Outcome      @default(NONE)
+  notes       String?      @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  outreach Outreach[]
+
+  @@unique([userId, jobId])
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Contact & Outreach (Phase 6 — published info only)
+// ---------------------------------------------------------------------------
+
+model Contact {
+  id         String  @id @default(cuid())
+  userId     String
+  user       User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  jobId      String
+  job        Job     @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  name       String?
+  email      String?
+  source     String // which source surfaced it
+  provenance String // e.g. "from job posting", "added by you"
+
+  createdAt DateTime @default(now())
+
+  outreach Outreach?
+
+  // One contact per user+job+email (published or manually added).
+  @@unique([userId, jobId, email])
+  @@index([jobId])
+  @@index([userId])
+}
+
+enum OutreachStatus {
+  DRAFTED
+  SENT
+  REPLIED
+}
+
+model Outreach {
+  id           String         @id @default(cuid())
+  userId       String
+  user         User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  contactId    String         @unique
+  contact      Contact        @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  reviewItemId String?
+  reviewItem   ReviewItem?    @relation(fields: [reviewItemId], references: [id], onDelete: SetNull)
+
+  status OutreachStatus @default(DRAFTED)
+  draft  String?        @db.Text
+  sentAt DateTime?
+  notes  String?        @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([contactId])
+  @@index([userId])
+}
